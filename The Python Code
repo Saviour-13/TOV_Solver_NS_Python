@@ -1,0 +1,138 @@
+import numpy as np
+from scipy.interpolate import interp1d
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt  
+
+# === Constants and unit conversions ===
+pi = np.pi
+mpi4tokmm2 = 1.3152e-6  # Conversion from MeV/fm^3 to km^-2
+cspeed = 2.99792e5      # Speed of light in km/s
+kmpersunsmass = 1.47    # km per solar mass
+badcs = 1e20 * mpi4tokmm2  # Energy density where causality breaks
+
+# === Load the equation of state (EoS) ===
+def init_eqofstate():
+    # Load EoS data from a file
+    data = np.loadtxt('EOSSamma_2_6_04.dat')
+    rhoinit = data[:, 0] * mpi4tokmm2
+    Pinit = data[:, 1] * mpi4tokmm2
+    return interp1d(Pinit, rhoinit, fill_value="extrapolate"), rhoinit[0] / Pinit[0]
+
+Edens_interpol, rho_P_ratio = init_eqofstate()
+
+# === Initialize radial grid ===
+N = 13900
+h_small = 0.005
+h_large = 0.016
+r = np.zeros(N)
+r[0] = h_small
+for i in range(1, N):
+    if i >= 4001:
+        h = h_large
+    else:
+        h = h_small
+    r[i] = r[i-1] + h
+
+# === Initial conditions ===
+def tov_equations(r, y):
+    lambda_, Nu, P, g, phi = y
+    Edens = Edens_interpol(P) if P > 0 else 0
+    Omega = np.exp(phi / np.sqrt(3))
+    V = (1 - Omega**(-2))**2 / (4 * 10.0)
+    derV = (1 - Omega**(-2)) * Omega**(-2) / (np.sqrt(3) * 10.0)
+
+    derlambda = 4 * pi * r * Edens * Omega**(-4) * np.exp(2 * lambda_) + (1 - np.exp(2 * lambda_)) / (2 * r) + r * g**2 / 2 + r * np.exp(2 * lambda_) * V / 4
+    derNu = 4 * pi * r * P * Omega**(-4) * np.exp(2 * lambda_) + (np.exp(2 * lambda_) - 1) / (2 * r) + r * g**2 / 2 - r * np.exp(2 * lambda_) * V / 4
+    derP = -(Edens + P) * (derNu - g / np.sqrt(3))
+    derphi = g
+    derg = -(derNu - derlambda + 2 / r) * g + 4 * pi * np.exp(2 * lambda_) * Omega**(-4) * (3 * P - Edens) / np.sqrt(3) + np.exp(2 * lambda_) * derV / 4
+
+    return [derlambda, derNu, derP, derg, derphi]
+
+# Shooting method
+def shooting_method(prec=5e-4, max_iter=60):
+    central_pressures = []
+    results = []
+
+    for j in range(1, 500):
+        P_c = j * 5 * mpi4tokmm2
+        central_pressures.append(P_c)
+
+        phi_a, phi_b = 0.0, 1.0
+        error, s = 1.0, 0
+
+        while error > prec and s < max_iter:
+            phi_trial = (phi_a + phi_b) / 2
+            y0 = [0.0, 1.0, P_c, 0.0, phi_trial]
+
+            sol = solve_ivp(tov_equations, [r[0], r[-1]], y0, method='RK45', t_eval=r)
+            P_last = sol.y[2, -1]
+            phi_last = sol.y[4, -1]
+
+            if P_last <= 1e-10:
+                error = abs(phi_last)
+
+            if phi_last > 0:
+                phi_b = phi_trial
+            else:
+                phi_a = phi_trial
+
+            s += 1
+
+        results.append(sol)
+    
+    return central_pressures, results
+
+# Main computation
+central_pressures, results = shooting_method()
+
+# Extract and save results
+with open('Mass_of_Radius.dat', 'w') as mass_file:
+    for sol in results:
+        r_surface = sol.t[np.where(sol.y[2] <= 1e-10)[0][0]]
+        mass = r_surface * (1 - np.exp(-2 * sol.y[0, np.where(sol.t == r_surface)[0][0]])) / (2 * kmpersunsmass)   #check the paper
+        mass_file.write(f"{r_surface} {mass}\n")
+
+with open('J_moment.dat', 'w') as angular_file:
+    for sol in results:
+        r_surface = sol.t[np.where(sol.y[2] <= 1e-10)[0][0]]
+        angular_momentum = sol.y[3, np.where(sol.t == r_surface)[0][0]] / (cspeed * kmpersunsmass)
+        angular_file.write(f"{r_surface} {angular_momentum}\n")
+
+# === Plotting ===
+def plot_results():
+    """Plot results from the generated data files."""
+    # Load data from Mass_of_Radius.dat
+    mass_data = np.loadtxt('Mass_of_Radius.dat')
+    radius = mass_data[:, 0]  # Radius values
+    mass = mass_data[:, 1] # Mass values
+
+    # Plot Mass vs Radius
+    plt.figure(figsize=(10, 6))
+    plt.plot(radius, mass, label="Mass vs Radius")
+    plt.xlabel("Radius (km)")
+    plt.ylabel("Mass (Solar Masses)")
+    plt.title("Mass-Radius Relation of a Neutron Star")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('Mass_vs_Radius.png')  # Save the figure
+    plt.show()
+
+    # Load data from J_moment.dat
+    j_data = np.loadtxt('J_moment.dat')
+    radius = j_data[:, 0]  # Radius values
+    angular_momentum = j_data[:, 1]  # Angular momentum values
+
+    # Plot Angular Momentum vs Radius
+    plt.figure(figsize=(10, 6))
+    plt.plot(radius, angular_momentum, label="Angular Momentum vs Radius")
+    plt.xlabel("Radius (km)")
+    plt.ylabel("Angular Momentum")
+    plt.title("Angular Momentum of a Neutron Star")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('Angular_Momentum_vs_Radius.png')  # Save the figure
+    plt.show()
+
+# Generate the plots
+plot_results()
